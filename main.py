@@ -81,8 +81,10 @@ def make_html(launch):
 def check_chat(token, chat_id):
     me = api(token, "getMe")
     chat = api(token, "getChat", {"chat_id": chat_id})
+    if chat.get("type") == "private":
+        return chat, me, False
     if chat.get("type") not in ("group", "supergroup"):
-        raise ValueError("CHAT_ID должен указывать на группу/супергруппу")
+        raise ValueError("Нужен личный чат, группа или супергруппа")
     member = api(token, "getChatMember", {"chat_id": chat_id, "user_id": me["id"]})
     if member.get("status") in ("left", "kicked"):
         raise RuntimeError("Бот не состоит в группе")
@@ -98,6 +100,12 @@ def is_our_pin(chat, me):
 
 
 def parse_chat_ids():
+    private = os.getenv("PRIVATE_TEST_CHAT_ID", "").strip()
+    if private:
+        if not private.isdigit():
+            raise ValueError("PRIVATE_TEST_CHAT_ID должен быть положительным числовым Telegram ID")
+        LOG.info("🧪 Включён тест личного чата: групповая рассылка временно отключена.")
+        return [private]
     raw = os.getenv("CHAT_IDS", "").strip() or os.getenv("CHAT_ID", "").strip()
     ids = list(dict.fromkeys(part.strip() for part in raw.replace(";", ",").split(",") if part.strip()))
     if not ids:
@@ -145,8 +153,7 @@ def main():
             if record:
                 LOG.info("%s: уже отправлено сообщение %s, дубликат не создаём.", chat_id, record["message_id"])
                 if record.get("pinned") or not can_pin:
-                    if not can_pin:
-                        LOG.info("%s: права на закрепление нет, сообщение уже опубликовано.", chat_id)
+                    LOG.info("%s: сообщение уже опубликовано. Новое не отправляем.", chat_id)
                     continue
                 message_id = record["message_id"]
             elif is_our_pin(chat, me):
