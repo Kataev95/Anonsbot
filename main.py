@@ -10,6 +10,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 LOG = logging.getLogger("anonsbot")
+FAILED_ATTEMPTS = {}
 ROOT = Path(__file__).resolve().parent
 MARKER = "🍬 IRISKA 3.0 • АНОНС"
 
@@ -145,12 +146,14 @@ def handle_command(token, msg, username, state, path, allowed):
             LOG.info("%s: команда пользователя без админских прав; игнорируем", chat_str)
             return
     version = os.getenv("WIDGET_VERSION", "2").strip() or "2"
+    # Не повторять отклонённый Telegram запрос при серии /start.
+    last_failed = FAILED_ATTEMPTS.get(chat_str, 0)
+    if time.monotonic() - last_failed < 120:
+        LOG.info("%s: повторная команда пропущена (120 секунд после ошибки).", chat_str)
+        return
     record = state["chats"].get(chat_str)
     if record and str(record.get("version", "1")) == version:
-        api(token, "sendMessage", {
-            "chat_id": chat_id, "text": "🍬 Анонс этой версии уже опубликован в этом чате."
-        })
-        LOG.info("%s: сообщение версии %s уже существует", chat_str, version)
+        LOG.info("%s: сообщение версии %s уже существует; без повторного сообщения.", chat_str, version)
         return
     try:
         launch = datetime.fromisoformat(state["launch_at"])
@@ -165,13 +168,9 @@ def handle_command(token, msg, username, state, path, allowed):
         }, beta=beta)
     except RuntimeError as exc:
         LOG.error("%s: sendWidget отклонён: %s", chat_str, exc)
-        if "INPUT_MEDIA_WIDGET_NOT_ALLOWED" in str(exc):
-            note = ("⚠️ Telegram запретил HTML-виджет в этом чате "
-                    "(INPUT_MEDIA_WIDGET_NOT_ALLOWED). Команда /start не снимает "
-                    "серверное ограничение. В личном чате виджеты могут работать.")
-        else:
-            note = "⚠️ Не получилось отправить HTML-виджет. Проверьте журнал хостинга."
-        api(token, "sendMessage", {"chat_id": chat_id, "text": note})
+        FAILED_ATTEMPTS[chat_str] = time.monotonic()
+        # Не засоряем групповые чаты диагностическими сообщениями.
+        # Ошибка видна только в журналах хостинга.
         return
     message_id = response["message_id"]
     state["chats"][chat_str] = {
