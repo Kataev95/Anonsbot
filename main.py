@@ -130,6 +130,11 @@ def main():
         save_state(state_path, saved)
     html = make_html(launch)
     beta = os.getenv("WIDGET_API_BETA", "1").strip() != "0"
+    if beta:
+        LOG.warning(
+            "Используется beta Bot API. Обычный токен может работать в getMe, "
+            "но возвращать 401 на beta/test/sendWidget, если нет доступа к бете."
+        )
 
     for chat_id in chat_ids:
         key = int(chat_id) if chat_id.lstrip("-").isdigit() else chat_id
@@ -166,6 +171,14 @@ def main():
             LOG.info("%s: ✅ анонс закреплён!", chat_id)
         except (RuntimeError, ValueError, OSError) as exc:
             LOG.error("%s: ошибка: %s", chat_id, exc)
+            if beta and "sendWidget: HTTP 401" in str(exc):
+                LOG.error(
+                    "Обычный getMe уже прошёл: токен действителен для стандартного Bot API. "
+                    "Но beta-эндпоинт отклонил его. Это не ошибка CHAT_ID и не прав "
+                    "администратора. Проверьте доступ к beta Bot API или попробуйте "
+                    "WIDGET_API_BETA=0 только если sendWidget уже опубликован в "
+                    "основном API."
+                )
             # Остальные чаты не должны зависеть от ошибки в одном чате.
 
     LOG.info("Обработка %d чатов завершена. Процесс остаётся активным.", len(chat_ids))
