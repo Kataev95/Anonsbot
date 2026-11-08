@@ -84,11 +84,12 @@ def check_chat(token, chat_id):
     if chat.get("type") not in ("group", "supergroup"):
         raise ValueError("CHAT_ID должен указывать на группу/супергруппу")
     member = api(token, "getChatMember", {"chat_id": chat_id, "user_id": me["id"]})
-    if member.get("status") not in ("administrator", "creator"):
-        raise RuntimeError("Бот должен быть администратором группы")
-    if member.get("status") == "administrator" and not member.get("can_pin_messages", False):
-        raise RuntimeError("У бота нет разрешения закреплять сообщения")
-    return chat, me
+    if member.get("status") in ("left", "kicked"):
+        raise RuntimeError("Бот не состоит в группе")
+    can_pin = member.get("status") == "creator" or (
+        member.get("status") == "administrator" and member.get("can_pin_messages", False)
+    )
+    return chat, me, can_pin
 
 
 def is_our_pin(chat, me):
@@ -139,11 +140,13 @@ def main():
     for chat_id in chat_ids:
         key = int(chat_id) if chat_id.lstrip("-").isdigit() else chat_id
         try:
-            chat, me = check_chat(token, key)
+            chat, me, can_pin = check_chat(token, key)
             record = saved["chats"].get(chat_id)
             if record:
                 LOG.info("%s: уже отправлено сообщение %s, дубликат не создаём.", chat_id, record["message_id"])
-                if record.get("pinned"):
+                if record.get("pinned") or not can_pin:
+                    if not can_pin:
+                        LOG.info("%s: права на закрепление нет, сообщение уже опубликовано.", chat_id)
                     continue
                 message_id = record["message_id"]
             elif is_our_pin(chat, me):
@@ -163,12 +166,18 @@ def main():
                 saved["chats"][chat_id] = {"message_id": message_id, "pinned": False}
                 save_state(state_path, saved)
                 LOG.info("%s: отправлено сообщение %s", chat_id, message_id)
-            api(token, "pinChatMessage", {
-                "chat_id": key, "message_id": message_id, "disable_notification": False
-            })
-            saved["chats"][chat_id]["pinned"] = True
-            save_state(state_path, saved)
-            LOG.info("%s: ✅ анонс закреплён!", chat_id)
+            if can_pin:
+                try:
+                    api(token, "pinChatMessage", {
+                        "chat_id": key, "message_id": message_id, "disable_notification": False
+                    })
+                    saved["chats"][chat_id]["pinned"] = True
+                    save_state(state_path, saved)
+                    LOG.info("%s: ✅ анонс закреплён!", chat_id)
+                except RuntimeError as exc:
+                    LOG.warning("%s: сообщение отправлено, закрепить не удалось: %s", chat_id, exc)
+            else:
+                LOG.info("%s: ✅ анонс отправлен без закрепления (нет права закреплять).", chat_id)
         except (RuntimeError, ValueError, OSError) as exc:
             LOG.error("%s: ошибка: %s", chat_id, exc)
             if beta and "sendWidget: HTTP 401" in str(exc):
