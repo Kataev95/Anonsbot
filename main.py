@@ -96,63 +96,79 @@ def is_our_pin(chat, me):
     return (pinned.get("from") or {}).get("id") == me["id"] and MARKER in pinned.get("caption", "")
 
 
+def parse_chat_ids():
+    raw = os.getenv("CHAT_IDS", "").strip() or os.getenv("CHAT_ID", "").strip()
+    ids = list(dict.fromkeys(part.strip() for part in raw.replace(";", ",").split(",") if part.strip()))
+    if not ids:
+        raise ValueError("Укажите CHAT_IDS=-100111,-100222 или CHAT_ID=-100111")
+    return ids
+
+
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
     token = os.getenv("BOT_TOKEN", "").strip()
-    chat_id = os.getenv("CHAT_ID", "").strip()
-    if not token or not chat_id:
-        raise ValueError("Укажите BOT_TOKEN и CHAT_ID в переменных хостинга")
-    chat_key = int(chat_id) if chat_id.lstrip("-").isdigit() else chat_id
+    if not token:
+        raise ValueError("Укажите BOT_TOKEN")
+    chat_ids = parse_chat_ids()
     state_path = state_file()
-    saved = read_state(state_path)
-    chat, me = check_chat(token, chat_key)
+    saved = read_state(state_path) or {}
+    if "chats" not in saved:
+        old = saved
+        saved = {"chats": {}}
+        if old.get("chat_id") and old.get("message_id"):
+            saved["chats"][str(old["chat_id"])] = {
+                "message_id": old["message_id"], "pinned": old.get("pinned", False)
+            }
+            if old.get("launch_at"):
+                saved["launch_at"] = old["launch_at"]
 
-    if saved and str(saved.get("chat_id")) == str(chat_id):
-        LOG.info("Запись уже есть: message_id=%s. Повторная отправка запрещена.", saved.get("message_id"))
-        if not saved.get("pinned", False):
-            try:
-                api(token, "pinChatMessage", {"chat_id": chat_key, "message_id": saved["message_id"], "disable_notification": False})
-                saved["pinned"] = True
-                save_state(state_path, saved)
-                LOG.info("✅ Повторное закрепление выполнено.")
-            except RuntimeError as exc:
-                LOG.warning("Закрепить пока не удалось: %s", exc)
-    elif is_our_pin(chat, me):
-        LOG.info("Наш анонс уже закреплён — дубль не публикуем.")
-        saved = {"chat_id": chat_id, "message_id": chat["pinned_message"]["message_id"], "pinned": True}
-        save_state(state_path, saved)
+    if saved.get("launch_at"):
+        launch = datetime.fromisoformat(saved["launch_at"])
     else:
         launch = target_time()
-        html = make_html(launch)
-        beta = os.getenv("WIDGET_API_BETA", "1").strip() != "0"
-        LOG.info("Отправляем HTML-виджет в %s (%s API)...", chat_id, "beta" if beta else "regular")
-        msg = api(token, "sendWidget", {
-            "chat_id": chat_key,
-            "html": html,
-            "width": 0,
-            "height": 375,
-            "caption": MARKER + "\n🐾 Возвращение питомцев через 10 дней!",
-            "disable_notification": False,
-        }, beta=beta)
-        saved = {"chat_id": chat_id, "message_id": msg["message_id"], "launch_at": launch.isoformat(), "pinned": False}
-        save_state(state_path, saved)  # обязательно ДО попытки закрепления
-        LOG.info("Виджет отправлен: message_id=%s", msg["message_id"])
-        try:
-            api(token, "pinChatMessage", {
-                "chat_id": chat_key,
-                "message_id": msg["message_id"],
-                "disable_notification": False,
-            })
-            saved["pinned"] = True
-            save_state(state_path, saved)
-            LOG.info("✅ Анонс закреплён!")
-        except RuntimeError as exc:
-            LOG.warning("Сообщение отправлено, но не закреплено: %s", exc)
-            LOG.warning("Исправьте права и перезапустите контейнер. Не удаляйте STATE_DIR.")
+        saved["launch_at"] = launch.isoformat()
+        save_state(state_path, saved)
+    html = make_html(launch)
+    beta = os.getenv("WIDGET_API_BETA", "1").strip() != "0"
 
-    # Хостингам с политикой restart=always нужен живой процесс.
-    # Постоянный опрос для таймера не нужен: анимация и таймер работают на клиенте.
-    LOG.info("Анонс опубликован. Процесс оставлен активным без запросов к Telegram.")
+    for chat_id in chat_ids:
+        key = int(chat_id) if chat_id.lstrip("-").isdigit() else chat_id
+        try:
+            chat, me = check_chat(token, key)
+            record = saved["chats"].get(chat_id)
+            if record:
+                LOG.info("%s: уже отправлено сообщение %s, дубликат не создаём.", chat_id, record["message_id"])
+                if record.get("pinned"):
+                    continue
+                message_id = record["message_id"]
+            elif is_our_pin(chat, me):
+                message_id = chat["pinned_message"]["message_id"]
+                saved["chats"][chat_id] = {"message_id": message_id, "pinned": True}
+                save_state(state_path, saved)
+                LOG.info("%s: анонс уже закреплён.", chat_id)
+                continue
+            else:
+                LOG.info("%s: отправляем HTML-виджет...", chat_id)
+                msg = api(token, "sendWidget", {
+                    "chat_id": key, "html": html, "width": 0, "height": 375,
+                    "caption": MARKER + "\n🐾 Возвращение питомцев уже близко!",
+                    "disable_notification": False,
+                }, beta=beta)
+                message_id = msg["message_id"]
+                saved["chats"][chat_id] = {"message_id": message_id, "pinned": False}
+                save_state(state_path, saved)
+                LOG.info("%s: отправлено сообщение %s", chat_id, message_id)
+            api(token, "pinChatMessage", {
+                "chat_id": key, "message_id": message_id, "disable_notification": False
+            })
+            saved["chats"][chat_id]["pinned"] = True
+            save_state(state_path, saved)
+            LOG.info("%s: ✅ анонс закреплён!", chat_id)
+        except (RuntimeError, ValueError, OSError) as exc:
+            LOG.error("%s: ошибка: %s", chat_id, exc)
+            # Остальные чаты не должны зависеть от ошибки в одном чате.
+
+    LOG.info("Обработка %d чатов завершена. Процесс остаётся активным.", len(chat_ids))
     while True:
         time.sleep(3600)
 
