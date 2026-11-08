@@ -139,6 +139,7 @@ def main():
         save_state(state_path, saved)
     html = make_html(launch)
     beta = os.getenv("WIDGET_API_BETA", "1").strip() != "0"
+    version = os.getenv("WIDGET_VERSION", "1").strip()
     if beta:
         LOG.warning(
             "Используется beta Bot API. Обычный токен может работать в getMe, "
@@ -150,15 +151,15 @@ def main():
         try:
             chat, me, can_pin = check_chat(token, key)
             record = saved["chats"].get(chat_id)
-            if record:
-                LOG.info("%s: уже отправлено сообщение %s, дубликат не создаём.", chat_id, record["message_id"])
+            if record and str(record.get("version", "1")) == version:
+                LOG.info("%s: уже отправлено сообщение %s (версия %s), дубликат не создаём.", chat_id, record["message_id"], version)
                 if record.get("pinned") or not can_pin:
                     LOG.info("%s: сообщение уже опубликовано. Новое не отправляем.", chat_id)
                     continue
                 message_id = record["message_id"]
-            elif is_our_pin(chat, me):
+            elif not record and version == "1" and is_our_pin(chat, me):
                 message_id = chat["pinned_message"]["message_id"]
-                saved["chats"][chat_id] = {"message_id": message_id, "pinned": True}
+                saved["chats"][chat_id] = {"message_id": message_id, "pinned": True, "version": version}
                 save_state(state_path, saved)
                 LOG.info("%s: анонс уже закреплён.", chat_id)
                 continue
@@ -170,7 +171,7 @@ def main():
                     "disable_notification": False,
                 }, beta=beta)
                 message_id = msg["message_id"]
-                saved["chats"][chat_id] = {"message_id": message_id, "pinned": False}
+                saved["chats"][chat_id] = {"message_id": message_id, "pinned": False, "version": version}
                 save_state(state_path, saved)
                 LOG.info("%s: отправлено сообщение %s", chat_id, message_id)
             if can_pin:
