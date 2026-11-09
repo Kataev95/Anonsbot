@@ -248,6 +248,53 @@ def handle_command(token, msg, username, state, path, allowed):
             LOG.warning("%s: виджет опубликован, закрепление не удалось: %s", chat_str, exc)
 
 
+def handle_inline_query(token, query, state):
+    """Ответить на inline-поиск одним настоящим HTML-виджетом (не текстовым сообщением)."""
+    query_id = query.get("id")
+    user = query.get("from") or {}
+    user_id = str(user.get("id", ""))
+    owner_id = os.getenv("OWNER_ID", "").strip()
+    if not query_id:
+        return
+    # Отвечаем пустым списком посторонним, чтобы не давать публиковать
+    # наш анонс во всех чатах Telegram.
+    if not owner_id or user_id != owner_id:
+        api(token, "answerInlineQuery", {
+            "inline_query_id": query_id, "results": [],
+            "cache_time": 0, "is_personal": True,
+        })
+        LOG.info("Inline-запрос %s: доступ запрещён (OWNER_ID)", user_id)
+        return
+
+    request = (query.get("query") or "").strip().lower()
+    if request not in ("", "anons", "анонс", "iriska", "ириска", "widget", "preview"):
+        api(token, "answerInlineQuery", {
+            "inline_query_id": query_id, "results": [],
+            "cache_time": 0, "is_personal": True,
+        })
+        return
+
+    launch = datetime.fromisoformat(state["launch_at"])
+    html = make_html(launch)
+    version = os.getenv("WIDGET_VERSION", "2").strip() or "2"
+    result = {
+        "type": "article",
+        "id": "iriska-widget-" + version,
+        "title": "🍬 IRISKA 3.0 — анонс",
+        "description": "Интерактивная HTML-заставка с таймером до обновления",
+        "input_message_content": {
+            "html": html,
+            "height": 375,
+        },
+    }
+    api(token, "answerInlineQuery", {
+        "inline_query_id": query_id, "results": [result],
+        "cache_time": 0, "is_personal": True,
+    })
+    LOG.info("✅ Inline-результат HTMLWidget отправлен для user_id=%s, chat_type=%s",
+             user_id, query.get("chat_type", "unknown"))
+
+
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
     token = os.getenv("BOT_TOKEN", "").strip()
@@ -274,7 +321,7 @@ def main():
     allowed = parse_allowed_chats()
     if os.getenv("PRIVATE_TEST_CHAT_ID", "").strip():
         LOG.warning("PRIVATE_TEST_CHAT_ID больше не запускает авторассылку. Используйте /start в ЛС.")
-    LOG.info("🤖 @%s запущен. Ожидаю /start@%s или /anons@%s в группе.", username, username, username)
+    LOG.info("🤖 @%s запущен. Ожидаю /start@%s, /anons@%s и inline-запросы.", username, username, username)
     LOG.info("Отправки при старте нет. Ограничение CHAT_IDS: %s", ", ".join(sorted(allowed)) or "не задано")
     offset = None
     while True:
@@ -282,11 +329,17 @@ def main():
             updates = api(token, "getUpdates", {
                 "timeout": 20,
                 "offset": offset,
-                "allowed_updates": ["message"],
+                "allowed_updates": ["message", "inline_query"],
             }) or []
             for update in updates:
                 offset = update["update_id"] + 1
                 msg = update.get("message")
+                inline = update.get("inline_query")
+                if inline:
+                    try:
+                        handle_inline_query(token, inline, state)
+                    except (RuntimeError, ValueError, OSError) as exc:
+                        LOG.error("Ошибка answerInlineQuery: %s", exc)
                 if msg:
                     try:
                         handle_command(token, msg, username, state, path, allowed)
