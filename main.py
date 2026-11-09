@@ -121,6 +121,48 @@ def parse_allowed_chats():
     return {v.strip() for v in raw.replace(";", ",").split(",") if v.strip()}
 
 
+def handle_test_forward(token, msg, allowed):
+    """Отдельная команда: проверить Bot API forwardMessage, не отправляя ничего автоматически."""
+    chat = msg.get("chat") or {}
+    user = msg.get("from") or {}
+    if chat.get("type") != "private" or not user or user.get("is_bot"):
+        return
+    owner = os.getenv("OWNER_ID", "").strip() or os.getenv("PRIVATE_TEST_CHAT_ID", "").strip()
+    if not owner or owner != str(user.get("id")):
+        LOG.warning("Команда /testforward отклонена: OWNER_ID не установлен или не совпадает.")
+        api(token, "sendMessage", {"chat_id": chat["id"],
+                                   "text": "🔒 Укажите на хостинге OWNER_ID со своим Telegram ID."})
+        return
+    text = (msg.get("text") or "").strip()
+    args = text.split()
+    if len(args) != 3 or not args[1].lstrip("-").isdigit() or not args[2].isdigit():
+        api(token, "sendMessage", {"chat_id": chat["id"],
+                                   "text": "Формат: /testforward -1001234567890 1462\n"
+                                           "Первое число — ID группы, второе — ID HTML-сообщения в вашем ЛС."})
+        return
+    target = args[1]
+    if target not in allowed:
+        api(token, "sendMessage", {"chat_id": chat["id"],
+                                   "text": "🔒 Группа должна присутствовать в CHAT_IDS."})
+        return
+    message_id = int(args[2])
+    try:
+        result = api(token, "forwardMessage", {
+            "chat_id": int(target),
+            "from_chat_id": chat["id"],
+            "message_id": message_id,
+            "disable_notification": True,
+        })
+        LOG.info("✅ forwardMessage из ЛС %s в группу %s: message_id=%s",
+                 message_id, target, result.get("message_id"))
+        api(token, "sendMessage", {"chat_id": chat["id"], "text":
+            f"✅ Telegram разрешил пересылку в {target}! ID: {result.get('message_id')}."})
+    except RuntimeError as exc:
+        LOG.error("❌ forwardMessage из ЛС %s в группу %s: %s", message_id, target, exc)
+        api(token, "sendMessage", {"chat_id": chat["id"], "text":
+            f"❌ Telegram отклонил пересылку: {str(exc)[:320]}"})
+
+
 def handle_command(token, msg, username, state, path, allowed):
     chat = msg.get("chat") or {}
     chat_id = chat.get("id")
@@ -131,7 +173,12 @@ def handle_command(token, msg, username, state, path, allowed):
     command = body.split(maxsplit=1)[0]
     action = command.split("@", 1)[0].lower()
     recipient = command.split("@", 1)[1].lower() if "@" in command else ""
-    if action not in ("/start", "/anons") or (recipient and recipient != username.lower()):
+    if recipient and recipient != username.lower():
+        return
+    if action == "/testforward":
+        handle_test_forward(token, msg, allowed)
+        return
+    if action not in ("/start", "/anons"):
         return
     kind = chat.get("type")
     if kind not in ("private", "group", "supergroup"):
