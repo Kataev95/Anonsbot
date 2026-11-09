@@ -11,6 +11,7 @@ from urllib.request import Request, urlopen
 
 LOG = logging.getLogger("anonsbot")
 FAILED_ATTEMPTS = {}
+INLINE_WIDGET_REJECTED = False
 ROOT = Path(__file__).resolve().parent
 MARKER = "🍬 IRISKA 3.0 • АНОНС"
 
@@ -249,7 +250,8 @@ def handle_command(token, msg, username, state, path, allowed):
 
 
 def handle_inline_query(token, query, state):
-    """Ответить на inline-поиск одним настоящим HTML-виджетом (не текстовым сообщением)."""
+    """Попытаться показать HTML-виджет, не повторяя серверную ошибку на каждый символ."""
+    global INLINE_WIDGET_REJECTED
     query_id = query.get("id")
     user = query.get("from") or {}
     user_id = str(user.get("id", ""))
@@ -264,6 +266,15 @@ def handle_inline_query(token, query, state):
             "cache_time": 0, "is_personal": True,
         })
         LOG.info("Inline-запрос %s: доступ запрещён (OWNER_ID)", user_id)
+        return
+
+    if INLINE_WIDGET_REJECTED:
+        # После первого серверного запрета возвращаем пустой поиск.
+        # Не создаём десятки одинаковых ошибок при наборе запроса.
+        api(token, "answerInlineQuery", {
+            "inline_query_id": query_id, "results": [],
+            "cache_time": 0, "is_personal": True,
+        })
         return
 
     request = (query.get("query") or "").strip().lower()
@@ -287,12 +298,27 @@ def handle_inline_query(token, query, state):
             "height": 375,
         },
     }
-    api(token, "answerInlineQuery", {
-        "inline_query_id": query_id, "results": [result],
-        "cache_time": 0, "is_personal": True,
-    })
-    LOG.info("✅ Inline-результат HTMLWidget отправлен для user_id=%s, chat_type=%s",
-             user_id, query.get("chat_type", "unknown"))
+    try:
+        api(token, "answerInlineQuery", {
+            "inline_query_id": query_id, "results": [result],
+            "cache_time": 0, "is_personal": True,
+        })
+        LOG.info("✅ Inline-результат HTMLWidget отправлен для user_id=%s, chat_type=%s",
+                 user_id, query.get("chat_type", "unknown"))
+    except RuntimeError as exc:
+        if "INPUT_MEDIA_WIDGET_NOT_ALLOWED" in str(exc):
+            INLINE_WIDGET_REJECTED = True
+            LOG.error(
+                "Telegram отклонил HTML-результат Inline Mode. "
+                "Повторные запросы виджета отключены до следующего перезапуска: %s",
+                exc
+            )
+            api(token, "answerInlineQuery", {
+                "inline_query_id": query_id, "results": [],
+                "cache_time": 0, "is_personal": True,
+            })
+            return
+        raise
 
 
 def main():
